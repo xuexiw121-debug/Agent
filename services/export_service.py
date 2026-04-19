@@ -45,6 +45,14 @@ def _sanitize_pdf_text(text: str) -> str:
         "\u00B7": "-",
         "\u2022": "-",
         "\uFFFD": " ",
+        "（": "(",
+        "）": ")",
+        "【": "[",
+        "】": "]",
+        "“": "\"",
+        "”": "\"",
+        "‘": "'",
+        "’": "'",
     }
     for src, dst in replacements.items():
         value = value.replace(src, dst)
@@ -59,13 +67,12 @@ def _sanitize_pdf_text(text: str) -> str:
         o = ord(ch)
         if 0x21 <= o <= 0x7E:
             return True
-        if 0x3400 <= o <= 0x9FFF:
+        # 对非 ASCII 字符再做一层 gb2312 可编码校验，避免 PDF 缺字方块
+        try:
+            ch.encode("gb2312")
             return True
-        if 0x3000 <= o <= 0x303F:
-            return True
-        if 0xFF01 <= o <= 0xFF65:
-            return True
-        return False
+        except Exception:
+            return False
 
     value = "".join(ch if _is_safe_char(ch) else " " for ch in value)
     value = re.sub(r"[ \t]{2,}", " ", value)
