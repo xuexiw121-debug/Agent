@@ -1,4 +1,4 @@
-﻿import io
+import io
 import os
 import re
 import unicodedata
@@ -7,8 +7,8 @@ from urllib.request import urlopen
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
-from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen import canvas
 
@@ -75,38 +75,38 @@ def _sanitize_pdf_text(text: str) -> str:
 
 def structured_plan_to_markdown(destination: str, days: int, total_budget: int, data: dict) -> str:
     lines = [
-        f"# {destination} 鏃呰璁″垝",
+        f"# {destination} 旅行计划",
         "",
-        f"- 澶╂暟: {days}",
-        f"- 棰勭畻: 楼{total_budget}",
+        f"- 天数: {days}",
+        f"- 预算: ¥{total_budget}",
         "",
-        "## 鎬昏",
-        data.get("overview", "(鏃?"),
+        "## 总览",
+        data.get("overview", "(无)"),
         "",
-        "## 棰勭畻绛栫暐",
-        data.get("budget_summary", "(鏃?"),
+        "## 预算策略",
+        data.get("budget_summary", "(无)"),
         "",
     ]
 
     daily_plan = data.get("daily_plan", [])
     if isinstance(daily_plan, list) and daily_plan:
-        lines.append("## 姣忔棩瀹夋帓")
+        lines.append("## 每日安排")
         lines.append("")
         for d in daily_plan:
-            lines.append(f"### Day {d.get('day', '?')} - {d.get('theme', '鏈懡鍚嶄富棰?)}")
+            lines.append(f"### Day {d.get('day', '?')} - {d.get('theme', '未命名主题')}")
             highlights = d.get("highlights", [])
             if isinstance(highlights, list) and highlights:
-                lines.append("- 浜偣:")
+                lines.append("- 亮点:")
                 for h in highlights:
                     lines.append(f"  - {h}")
-            lines.append(f"- 椁愰ギ: {d.get('food', '(鏃?')}")
-            lines.append(f"- 浜ら€? {d.get('transport', '(鏃?')}")
-            lines.append(f"- 棰勮鑺辫垂: 楼{d.get('estimated_cost', 0)}")
+            lines.append(f"- 餐饮: {d.get('food', '(无)')}")
+            lines.append(f"- 交通: {d.get('transport', '(无)')}")
+            lines.append(f"- 预计花费: ¥{d.get('estimated_cost', 0)}")
             lines.append("")
 
     tips = data.get("tips", [])
     if isinstance(tips, list) and tips:
-        lines.append("## 鍑鸿鎻愮ず")
+        lines.append("## 出行提示")
         for t in tips:
             lines.append(f"- {t}")
     return "\n".join(lines)
@@ -119,6 +119,7 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
 
     font_name = "Helvetica"
     using_cid_font = False
+
     for font_path, fname in [
         ("C:/Windows/Fonts/msyh.ttc", "MSYH"),
         ("C:/Windows/Fonts/simsun.ttc", "SIMSUN"),
@@ -131,14 +132,12 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
             except Exception:
                 continue
 
-    # Streamlit Cloud(Linux) 涓婇€氬父娌℃湁 Windows 涓枃瀛椾綋锛岃繖閲屽洖閫€鍒?ReportLab 鐨?CJK 瀛椾綋
     if font_name == "Helvetica":
         try:
             font_name = "STSong-Light"
             pdfmetrics.registerFont(UnicodeCIDFont(font_name))
             using_cid_font = True
         except Exception:
-            # 鏈€鍚庡厹搴曚粛浣跨敤 Helvetica锛堜腑鏂囧彲鑳芥棤娉曞畬鏁存樉绀猴級
             font_name = "Helvetica"
 
     left = 40
@@ -153,7 +152,7 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
         c.line(left, 26, width - right, 26)
         c.setFillColor(colors.HexColor("#6B7280"))
         c.setFont(font_name, 9)
-        c.drawRightString(width - right, 14, f"绗?{c.getPageNumber()} 椤?)
+        c.drawRightString(width - right, 14, f"第 {c.getPageNumber()} 页")
         c.setFillColor(colors.black)
 
     def start_new_page() -> None:
@@ -172,23 +171,7 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
         if not clean:
             return [""]
 
-        # CJK 瀛椾綋浣跨敤鎸夊瓧绗︽崲琛屽嵆鍙紱闈?CJK 淇濇寔鍚屾牱閫昏緫
-        if using_cid_font:
-            lines = []
-            current = ""
-            for ch in clean:
-                candidate = f"{current}{ch}"
-                if pdfmetrics.stringWidth(candidate, font_name, font_size) <= max_width:
-                    current = candidate
-                else:
-                    if current:
-                        lines.append(current)
-                    current = ch
-            if current:
-                lines.append(current)
-            return lines or [""]
-
-        lines = []
+        lines: list[str] = []
         current = ""
         for ch in clean:
             candidate = f"{current}{ch}"
@@ -244,13 +227,12 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
                 y -= leading
         y -= 2
 
-    # 鏍囬鍗＄墖
     lines = markdown_text.splitlines()
     if lines:
         first_title = ""
         for l in lines:
             if l.strip().startswith("# "):
-                first_title = l.strip()[2:].strip()
+                first_title = _sanitize_pdf_text(l.strip()[2:].strip())
                 break
         if first_title:
             ensure_space(70)
@@ -262,7 +244,7 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
             c.drawString(left + 12, y - 15, first_title)
             c.setFillColor(colors.HexColor("#475569"))
             c.setFont(font_name, 10)
-            c.drawString(left + 12, y - 32, "鏅鸿兘鏃呰瑙勫垝鎶ュ憡")
+            c.drawString(left + 12, y - 32, "智能旅行规划报告")
             y -= 66
             c.setFillColor(colors.black)
 
@@ -274,7 +256,6 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
 
         stripped = line.strip()
         if stripped.startswith("# "):
-            # 宸插湪鏍囬鍗＄墖灞曠ず涓绘爣棰橈紝杩欓噷璺宠繃
             continue
         if stripped.startswith("## "):
             y -= 2
@@ -334,24 +315,23 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
             c.roundRect(left, height - 96, content_width, 56, 8, stroke=1, fill=1)
             c.setFillColor(colors.HexColor("#155E75"))
             c.setFont(font_name, 16)
-            c.drawString(left + 12, height - 62, f"Day {day_no} 璺嚎鍥?)
+            c.drawString(left + 12, height - 62, f"Day {day_no} 路线图")
             c.setFillColor(colors.HexColor("#334155"))
             c.setFont(font_name, 10)
-            c.drawString(left + 12, height - 80, "璺嚎鍥剧敱楂樺痉闈欐€佸湴鍥剧敓鎴?)
+            c.drawString(left + 12, height - 80, "路线图由高德静态地图生成")
 
-            # 鍥惧墠璇存槑锛氫富棰?+ 褰撴棩鏅偣
             text_y = height - 116
             c.setFillColor(colors.HexColor("#0F172A"))
             if theme:
                 c.setFont(font_name, 11)
-                for line in wrap_text(f"涓婚锛歿theme}", 11, content_width):
+                for line in wrap_text(f"主题：{theme}", 11, content_width):
                     c.drawString(left, text_y, line)
                     text_y -= 15
                 text_y -= 2
 
             if spots:
                 c.setFont(font_name, 11)
-                c.drawString(left, text_y, "褰撴棩鏅偣锛?)
+                c.drawString(left, text_y, "当日景点：")
                 text_y -= 16
                 c.setFont(font_name, 10.5)
                 for idx, spot in enumerate(spots, start=1):
@@ -368,7 +348,7 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
                 image_reader = ImageReader(io.BytesIO(image_bytes))
                 img_w, img_h = image_reader.getSize()
                 if img_w <= 0 or img_h <= 0:
-                    raise ValueError("鍥剧墖灏哄寮傚父")
+                    raise ValueError("图片尺寸异常")
 
                 max_w = content_width
                 max_h = max(180, text_y - (bottom + 10))
@@ -377,15 +357,22 @@ def markdown_to_pdf_bytes(markdown_text: str, daily_route_maps: list[dict] | Non
                 draw_h = float(img_h) * ratio
                 x = left + (content_width - draw_w) / 2
                 y_img = max(bottom + 8, text_y - draw_h)
-                c.drawImage(image_reader, x, y_img, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
+                c.drawImage(
+                    image_reader,
+                    x,
+                    y_img,
+                    width=draw_w,
+                    height=draw_h,
+                    preserveAspectRatio=True,
+                    mask="auto",
+                )
             except Exception as e:
                 c.setFont(font_name, 11)
                 c.setFillColor(colors.HexColor("#B91C1C"))
-                c.drawString(left, height - 110, f"璇ユ棩璺嚎鍥惧姞杞藉け璐? {e}")
+                c.drawString(left, height - 110, f"该日路线图加载失败: {e}")
                 c.setFillColor(colors.black)
 
     draw_footer()
     c.save()
     buffer.seek(0)
     return buffer.getvalue()
-
