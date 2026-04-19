@@ -1,0 +1,10 @@
+streamlit
+openai
+python-dotenv
+pydantic
+pydantic-settings
+dashscope
+pandas
+folium
+streamlit-folium
+reportlab
