@@ -2,6 +2,7 @@ import difflib
 import json
 import math
 import re
+import time
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -870,6 +871,8 @@ def repair_unlocatable_daily_highlights(
     structured_data: dict,
     max_segment_km: float = 80.0,
     destination_radius_km: float = 120.0,
+    max_days_to_fix: int = 5,
+    time_budget_s: float = 12.0,
 ) -> dict:
     daily_plan = structured_data.get("daily_plan", [])
     if not isinstance(daily_plan, list) or not daily_plan:
@@ -878,10 +881,19 @@ def repair_unlocatable_daily_highlights(
     days_updated = 0
     spots_replaced = 0
 
+    started_at = time.time()
+    processed_days = 0
+
     for day_item in daily_plan:
+        if processed_days >= max_days_to_fix:
+            break
+        if time.time() - started_at > time_budget_s:
+            break
+
         original = day_item.get("highlights", [])
         if not isinstance(original, list) or not original:
             continue
+        processed_days += 1
 
         original_clean = [normalize_spot_name(x) for x in original if str(x).strip()]
         if not original_clean:

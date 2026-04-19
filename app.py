@@ -1,5 +1,6 @@
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 import dashscope
 import folium
@@ -86,6 +87,12 @@ with st.expander("⚡ 展示体验设置", expanded=False):
     enable_segment_stream = st.toggle("按天分段流式展示", value=True)
     stream_delay = st.slider("每段加载间隔(秒)", min_value=0.0, max_value=0.8, value=0.12, step=0.02)
 
+with st.expander("🛡️ 生成稳定性设置", expanded=False):
+    generation_timeout_s = st.slider("AI 生成超时(秒)", min_value=20, max_value=180, value=90, step=10)
+    enable_auto_fix = st.toggle("生成后自动替换不可定位景点", value=True)
+    fix_time_budget_s = st.slider("定位纠偏时间预算(秒)", min_value=3, max_value=30, value=12, step=1)
+    fix_max_days = st.slider("最多纠偏天数", min_value=1, max_value=10, value=5, step=1)
+
 with st.form("travel_form"):
     st.header("📝 请填写您的旅行需求")
 
@@ -122,27 +129,38 @@ if submitted:
         ok_geo, geo_data = geocode_with_amap(AMAP_API_KEY, normalized_destination)
 
         with st.spinner("AI 正在紧张地为您规划行程中，请稍候..."):
-            plan, err = generate_travel_plan(
-                dashscope_api_key=DASHSCOPE_API_KEY,
-                model_name=MODEL_NAME,
-                destination=normalized_destination,
-                preferences=full_preferences,
-                days=int(days),
-                total_budget=int(total_budget),
-            )
+            try:
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        generate_travel_plan,
+                        dashscope_api_key=DASHSCOPE_API_KEY,
+                        model_name=MODEL_NAME,
+                        destination=normalized_destination,
+                        preferences=full_preferences,
+                        days=int(days),
+                        total_budget=int(total_budget),
+                    )
+                    plan, err = future.result(timeout=float(generation_timeout_s))
+            except FuturesTimeoutError:
+                plan, err = None, f"AI 生成超时（>{generation_timeout_s} 秒），请重试或减少天数。"
+            except Exception as e:
+                plan, err = None, f"生成异常: {e}"
 
         if err:
             st.error(err)
         elif plan:
             fix_summary = {"updated": False, "days_updated": 0, "spots_replaced": 0}
-            if plan.get("structured"):
-                fix_summary = repair_unlocatable_daily_highlights(
-                    amap_api_key=AMAP_API_KEY,
-                    destination=normalized_destination,
-                    structured_data=plan["structured"],
-                    max_segment_km=float(max_segment_km),
-                    destination_radius_km=float(destination_radius_km),
-                )
+            if plan.get("structured") and enable_auto_fix:
+                with st.spinner("正在校验并替换不可定位景点..."):
+                    fix_summary = repair_unlocatable_daily_highlights(
+                        amap_api_key=AMAP_API_KEY,
+                        destination=normalized_destination,
+                        structured_data=plan["structured"],
+                        max_segment_km=float(max_segment_km),
+                        destination_radius_km=float(destination_radius_km),
+                        max_days_to_fix=int(fix_max_days),
+                        time_budget_s=float(fix_time_budget_s),
+                    )
 
             st.session_state["generated_payload"] = {
                 "destination": normalized_destination,
