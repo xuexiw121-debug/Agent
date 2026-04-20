@@ -638,6 +638,7 @@ def render_multiday_route_map(
     max_segment_km: float = 80.0,
     route_mode: str = "driving",
     destination_radius_km: float = 120.0,
+    fast_mode: bool = True,
 ):
     daily_plan = structured_data.get("daily_plan", [])
     if not isinstance(daily_plan, list) or not daily_plan:
@@ -684,16 +685,22 @@ def render_multiday_route_map(
             for i in range(len(route_points) - 1):
                 a = route_points[i]
                 b = route_points[i + 1]
-                ok_route, route_info = get_amap_route_cached(amap_api_key, a["lon"], a["lat"], b["lon"], b["lat"], mode=route_mode)
-                if ok_route:
-                    day_dist_km += float(route_info["distance_km"])
-                    day_duration_min += float(route_info["duration_min"])
-                    day_polyline.extend([[pt[1], pt[0]] for pt in route_info["polyline"]])
-                else:
+                if fast_mode:
                     fallback_km = haversine_km(a["lat"], a["lon"], b["lat"], b["lon"])
                     day_dist_km += fallback_km
                     day_duration_min += max(1.0, fallback_km / 35.0 * 60.0)
                     day_polyline.extend([[a["lon"], a["lat"]], [b["lon"], b["lat"]]])
+                else:
+                    ok_route, route_info = get_amap_route_cached(amap_api_key, a["lon"], a["lat"], b["lon"], b["lat"], mode=route_mode)
+                    if ok_route:
+                        day_dist_km += float(route_info["distance_km"])
+                        day_duration_min += float(route_info["duration_min"])
+                        day_polyline.extend([[pt[1], pt[0]] for pt in route_info["polyline"]])
+                    else:
+                        fallback_km = haversine_km(a["lat"], a["lon"], b["lat"], b["lon"])
+                        day_dist_km += fallback_km
+                        day_duration_min += max(1.0, fallback_km / 35.0 * 60.0)
+                        day_polyline.extend([[a["lon"], a["lat"]], [b["lon"], b["lat"]]])
 
             all_paths.append({"day": day_no, "path": day_polyline, "color": color})
         else:
@@ -743,6 +750,8 @@ def render_multiday_route_map(
 
         legend_days = sorted({int(p["day"]) for p in all_points if isinstance(p.get("day"), int)})
         render_day_legend(legend_days)
+        if fast_mode:
+            st.caption("当前为总览快速模式：线路为景点间直线估算，可显著提升加载速度。")
         st_folium(m, use_container_width=True, height=480, returned_objects=[], key="multiday_map")
 
         if summary_rows:
@@ -838,7 +847,7 @@ def build_day_route_snapshot_url(
     if len(polyline_lnglat) < 2:
         return None
 
-    polyline_lnglat = _downsample_points(polyline_lnglat, max_points=80)
+    polyline_lnglat = _downsample_points(polyline_lnglat, max_points=40)
     points_text = ";".join([f"{lon:.6f},{lat:.6f}" for lon, lat in polyline_lnglat])
 
     day_no = day_item.get("day", "?")
@@ -858,11 +867,20 @@ def build_day_route_snapshot_url(
         "zoom": "12",
         "location": f"{center_lon:.6f},{center_lat:.6f}",
         "traffic": "0",
-        "path": f"8,0x1E88E5,1,,:{points_text}",
+        "path": f"10,0x0D47A1,1,,:{points_text}",
         "markers": "|".join(markers),
     }
     base_url = "https://restapi.amap.com/v3/staticmap"
-    return f"{base_url}?{urlencode(query)}"
+    url = f"{base_url}?{urlencode(query)}"
+
+    # 静态图 URL 过长时，高德可能忽略 path；降级为景点间直线以确保可见连线
+    if len(url) > 1800:
+        simple_points = [(float(p["lon"]), float(p["lat"])) for p in route_points]
+        simple_text = ";".join([f"{lon:.6f},{lat:.6f}" for lon, lat in simple_points])
+        query["path"] = f"10,0x0D47A1,1,,:{simple_text}"
+        url = f"{base_url}?{urlencode(query)}"
+
+    return url
 
 
 def repair_unlocatable_daily_highlights(

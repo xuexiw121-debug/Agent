@@ -61,6 +61,12 @@ def _sanitize_pdf_text(text: str) -> str:
     value = _EMOJI_PATTERN.sub("", value)
     value = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", " ", value)
 
+    # 进一步约束到 GBK 可编码字符，避免个别字符在 PDF 字体中显示为方块
+    try:
+        value = value.encode("gbk", errors="ignore").decode("gbk", errors="ignore")
+    except Exception:
+        pass
+
     def _is_safe_char(ch: str) -> bool:
         if ch in {"\n", "\t", " "}:
             return True

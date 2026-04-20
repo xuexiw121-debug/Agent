@@ -1,6 +1,9 @@
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
 
 import dashscope
 import folium
@@ -35,13 +38,237 @@ MODEL_NAME = resolve_model_name()
 dashscope.api_key = DASHSCOPE_API_KEY
 
 st.set_page_config(page_title="AI 旅行规划师", page_icon="✈️")
-st.title("🌍 AI 智能旅行规划师")
-st.caption("由 Streamlit 和阿里云百联强力驱动，为您打造专属旅行计划！")
+
+HISTORY_PATH = Path(__file__).resolve().parent / ".streamlit" / "history_plans.json"
+
+
+@st.cache_resource
+def get_runtime_payload_store() -> dict:
+    # 仅保存在服务进程内存中：可跨刷新恢复，服务重启后自动清空
+    return {}
+
+
+def get_or_create_visit_id() -> str:
+    visit_id = ""
+    try:
+        raw = st.query_params.get("visit")
+        if isinstance(raw, list):
+            visit_id = str(raw[0]) if raw else ""
+        elif raw is not None:
+            visit_id = str(raw)
+    except Exception:
+        visit_id = ""
+
+    if not visit_id:
+        visit_id = uuid4().hex
+        try:
+            st.query_params["visit"] = visit_id
+        except Exception:
+            pass
+
+    return visit_id
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_base_pdf_bytes(markdown_text: str) -> bytes:
+    return markdown_to_pdf_bytes(markdown_text, daily_route_maps=None)
+
+
+def load_plan_history() -> list:
+    try:
+        if not HISTORY_PATH.exists():
+            return []
+        data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception:
+        return []
+
+
+def save_plan_history(items: list) -> None:
+    try:
+        HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HISTORY_PATH.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def append_plan_history(payload: dict) -> None:
+    history = load_plan_history()
+    snapshot = json.loads(json.dumps(payload, ensure_ascii=False))
+    record = {
+        "id": uuid4().hex,
+        "created_at": int(time.time()),
+        "destination": snapshot.get("destination", "未知目的地"),
+        "days": int(snapshot.get("days", 0) or 0),
+        "total_budget": int(snapshot.get("total_budget", 0) or 0),
+        "payload": snapshot,
+    }
+    history.insert(0, record)
+    # 控制体量，避免历史文件过大
+    save_plan_history(history[:20])
+
+
+def inject_ui_style() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --bg0: #0b1020;
+            --bg1: #11182e;
+            --panel: rgba(255,255,255,0.05);
+            --panel-border: rgba(167, 139, 250, 0.25);
+            --accent: #8b5cf6;
+            --accent2: #38bdf8;
+            --text: #e5e7eb;
+            --muted: #9ca3af;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(1200px 500px at 0% 0%, rgba(139,92,246,0.18) 0%, rgba(139,92,246,0) 70%),
+                radial-gradient(900px 400px at 100% 10%, rgba(56,189,248,0.16) 0%, rgba(56,189,248,0) 70%),
+                linear-gradient(180deg, var(--bg1) 0%, var(--bg0) 100%);
+            color: var(--text);
+        }
+
+        .main > div {
+            max-width: 1080px;
+            padding-top: 1.2rem;
+        }
+
+        .hero-wrap {
+            border: 1px solid rgba(167, 139, 250, 0.28);
+            background: linear-gradient(135deg, rgba(139,92,246,0.16), rgba(56,189,248,0.12));
+            box-shadow: 0 10px 36px rgba(0,0,0,0.28);
+            border-radius: 20px;
+            padding: 20px 22px;
+            margin-bottom: 14px;
+            backdrop-filter: blur(8px);
+        }
+
+        .hero-title {
+            margin: 0;
+            font-size: 32px;
+            font-weight: 800;
+            letter-spacing: -0.4px;
+            background: linear-gradient(90deg, #c4b5fd, #7dd3fc 45%, #86efac);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-sub {
+            margin: 8px 0 0;
+            color: #d1d5db;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        .hero-badges {
+            margin-top: 12px;
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .hero-badge {
+            font-size: 12px;
+            color: #cbd5e1;
+            padding: 4px 10px;
+            border-radius: 999px;
+            border: 1px solid rgba(203, 213, 225, 0.24);
+            background: rgba(255,255,255,0.06);
+        }
+
+        div[data-testid="stExpander"] {
+            border: 1px solid var(--panel-border);
+            border-radius: 14px;
+            background: var(--panel);
+            backdrop-filter: blur(10px);
+        }
+
+        div[data-testid="stExpander"] details summary p {
+            color: var(--text) !important;
+            font-weight: 600;
+        }
+
+        div[data-testid="stForm"] {
+            border: 1px solid var(--panel-border);
+            border-radius: 16px;
+            padding: 8px 10px;
+            background: var(--panel);
+        }
+
+        div[data-testid="stMetric"] {
+            border: 1px solid rgba(125, 211, 252, 0.18);
+            border-radius: 12px;
+            background: rgba(255,255,255,0.04);
+            padding: 8px 10px;
+        }
+
+        .stButton > button, div[data-testid="stFormSubmitButton"] button, .stDownloadButton > button {
+            border: 0 !important;
+            border-radius: 10px !important;
+            font-weight: 700 !important;
+            background: linear-gradient(90deg, var(--accent), var(--accent2)) !important;
+            color: #ffffff !important;
+            box-shadow: 0 8px 22px rgba(56,189,248,0.22);
+        }
+
+        .stButton > button:hover, div[data-testid="stFormSubmitButton"] button:hover, .stDownloadButton > button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 28px rgba(139,92,246,0.35);
+        }
+
+        @media (max-width: 768px) {
+            .hero-title { font-size: 26px; }
+            .hero-wrap { padding: 16px; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_ui_style()
+st.markdown(
+    """
+    <div class="hero-wrap">
+      <h1 class="hero-title">AI 智能旅行规划师</h1>
+      <p class="hero-sub">结合大语言模型与地图路径能力，自动生成可执行的多日旅行方案，支持分段展示与报告导出。</p>
+      <div class="hero-badges">
+        <span class="hero-badge">路线可视化</span>
+        <span class="hero-badge">不可定位自动替换</span>
+        <span class="hero-badge">JSON/Markdown/PDF 导出</span>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if "generated_payload" not in st.session_state:
     st.session_state["generated_payload"] = None
 if "stream_pending" not in st.session_state:
     st.session_state["stream_pending"] = False
+if "restored_from_disk" not in st.session_state:
+    st.session_state["restored_from_disk"] = False
+if "visit_id" not in st.session_state:
+    st.session_state["visit_id"] = get_or_create_visit_id()
+if "confirm_clear_history" not in st.session_state:
+    st.session_state["confirm_clear_history"] = False
+
+if st.session_state["generated_payload"] is None:
+    runtime_store = get_runtime_payload_store()
+    restored_payload = runtime_store.get(st.session_state["visit_id"])
+    if isinstance(restored_payload, dict) and restored_payload.get("plan"):
+        st.session_state["generated_payload"] = restored_payload
+        st.session_state["stream_pending"] = False
+        st.session_state["restored_from_disk"] = True
 
 with st.expander("🔎 运行诊断", expanded=False):
     st.write(f"当前模型: {MODEL_NAME}")
@@ -62,36 +289,67 @@ with st.expander("🔎 运行诊断", expanded=False):
         else:
             st.error(str(geo_msg))
 
-with st.expander("🗺️ 地图显示设置", expanded=False):
-    map_engine_label = st.radio(
-        "地图引擎",
-        options=["Folium（推荐稳定）", "Pydeck（实验）"],
-        index=0,
-        horizontal=True,
-    )
-    map_engine = "folium" if map_engine_label.startswith("Folium") else "pydeck"
+if st.session_state.get("restored_from_disk"):
+    st.info("已恢复本次访问的上次生成结果。")
 
-    route_mode_label = st.radio(
-        "通行方式",
-        options=["驾车", "步行"],
-        index=0,
-        horizontal=True,
-    )
-    route_mode = "driving" if route_mode_label == "驾车" else "walking"
+with st.sidebar.expander("🗂️ 历史方案库", expanded=True):
+    history_items = load_plan_history()
+    top_left, top_right = st.columns(2)
+    top_left.caption(f"共 {len(history_items)} 条")
+    if top_right.button("清空全部", key="clear_all_history_btn", use_container_width=True):
+        st.session_state["confirm_clear_history"] = True
 
-    point_radius_px = st.slider("景点点位大小", min_value=2, max_value=12, value=5, step=1)
-    max_segment_km = st.slider("相邻景点最大距离(km)", min_value=5, max_value=120, value=80, step=5)
-    destination_radius_km = st.slider("目的地约束半径(km)", min_value=20, max_value=300, value=120, step=10)
+    if st.session_state.get("confirm_clear_history", False):
+        st.warning("确认清空全部历史记录？此操作不可恢复。")
+        confirm_col, cancel_col = st.columns(2)
+        if confirm_col.button("确认清空", key="confirm_clear_all_history", use_container_width=True):
+            save_plan_history([])
+            st.session_state["confirm_clear_history"] = False
+            st.rerun()
+        if cancel_col.button("取消", key="cancel_clear_all_history", use_container_width=True):
+            st.session_state["confirm_clear_history"] = False
+            st.rerun()
 
-with st.expander("⚡ 展示体验设置", expanded=False):
-    enable_segment_stream = st.toggle("按天分段流式展示", value=True)
-    stream_delay = st.slider("每段加载间隔(秒)", min_value=0.0, max_value=0.8, value=0.12, step=0.02)
+    if not history_items:
+        st.caption("暂无历史方案。")
+    else:
+        st.caption("左侧可快速恢复或删除历史方案。")
+        for idx, item in enumerate(history_items):
+            created_at = datetime.fromtimestamp(int(item.get("created_at", 0))).strftime("%m-%d %H:%M")
+            destination_h = item.get("destination", "未知目的地")
+            days_h = item.get("days", "?")
+            budget_h = item.get("total_budget", "?")
+            st.caption(f"{created_at} | {destination_h} | {days_h} 天 | ¥{budget_h}")
+            c_restore, c_delete = st.columns(2)
+            if c_restore.button("恢复", key=f"restore_history_{idx}", use_container_width=True):
+                selected_payload = item.get("payload")
+                if isinstance(selected_payload, dict) and selected_payload.get("plan"):
+                    st.session_state["generated_payload"] = selected_payload
+                    st.session_state["stream_pending"] = False
+                    st.session_state["restored_from_disk"] = False
+                    get_runtime_payload_store()[st.session_state["visit_id"]] = selected_payload
+                    st.rerun()
+            if c_delete.button("删除", key=f"delete_history_{idx}", use_container_width=True):
+                delete_id = item.get("id")
+                updated = [x for x in history_items if x.get("id") != delete_id]
+                save_plan_history(updated)
+                st.rerun()
+            st.divider()
 
-with st.expander("🛡️ 生成稳定性设置", expanded=False):
-    generation_timeout_s = st.slider("AI 生成超时(秒)", min_value=20, max_value=180, value=90, step=10)
-    enable_auto_fix = st.toggle("生成后自动替换不可定位景点", value=True)
-    fix_time_budget_s = st.slider("定位纠偏时间预算(秒)", min_value=3, max_value=30, value=12, step=1)
-    fix_max_days = st.slider("最多纠偏天数", min_value=1, max_value=10, value=5, step=1)
+# 默认行为（移除高级设置面板后固定参数）
+map_engine = "folium"
+route_mode = "driving"
+point_radius_px = 5
+max_segment_km = 80
+destination_radius_km = 120
+
+enable_segment_stream = True
+stream_delay = 0.12
+
+generation_timeout_s = 90
+enable_auto_fix = True
+fix_time_budget_s = 6
+fix_max_days = 3
 
 with st.form("travel_form"):
     st.header("📝 请填写您的旅行需求")
@@ -126,31 +384,36 @@ if submitted:
         if normalized_destination != destination.strip():
             st.info(f"已将目的地标准化为：{normalized_destination}")
 
+        progress = st.progress(0, text="步骤 1/4：准备输入参数...")
+        progress.progress(15, text="步骤 2/4：定位目的地...")
         ok_geo, geo_data = geocode_with_amap(AMAP_API_KEY, normalized_destination)
 
-        with st.spinner("AI 正在紧张地为您规划行程中，请稍候..."):
-            try:
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        generate_travel_plan,
-                        dashscope_api_key=DASHSCOPE_API_KEY,
-                        model_name=MODEL_NAME,
-                        destination=normalized_destination,
-                        preferences=full_preferences,
-                        days=int(days),
-                        total_budget=int(total_budget),
-                    )
-                    plan, err = future.result(timeout=float(generation_timeout_s))
-            except FuturesTimeoutError:
-                plan, err = None, f"AI 生成超时（>{generation_timeout_s} 秒），请重试或减少天数。"
-            except Exception as e:
-                plan, err = None, f"生成异常: {e}"
+        progress.progress(35, text="步骤 3/4：调用大模型生成行程...")
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    generate_travel_plan,
+                    dashscope_api_key=DASHSCOPE_API_KEY,
+                    model_name=MODEL_NAME,
+                    destination=normalized_destination,
+                    preferences=full_preferences,
+                    days=int(days),
+                    total_budget=int(total_budget),
+                )
+                plan, err = future.result(timeout=float(generation_timeout_s))
+        except FuturesTimeoutError:
+            plan, err = None, f"AI 生成超时（>{generation_timeout_s} 秒），请重试或减少天数。"
+        except Exception as e:
+            plan, err = None, f"生成异常: {e}"
 
         if err:
+            progress.empty()
             st.error(err)
         elif plan:
             fix_summary = {"updated": False, "days_updated": 0, "spots_replaced": 0}
-            if plan.get("structured") and enable_auto_fix:
+            effective_auto_fix = enable_auto_fix and int(days) <= 7
+            if plan.get("structured") and effective_auto_fix:
+                progress.progress(70, text="步骤 4/4：校验并纠偏景点定位...")
                 with st.spinner("正在校验并替换不可定位景点..."):
                     fix_summary = repair_unlocatable_daily_highlights(
                         amap_api_key=AMAP_API_KEY,
@@ -161,6 +424,10 @@ if submitted:
                         max_days_to_fix=int(fix_max_days),
                         time_budget_s=float(fix_time_budget_s),
                     )
+            elif int(days) > 7:
+                st.info("行程天数较多，已跳过自动纠偏以优先保证生成速度。")
+
+            progress.progress(95, text="步骤 4/4：保存结果并准备展示...")
 
             st.session_state["generated_payload"] = {
                 "destination": normalized_destination,
@@ -173,6 +440,14 @@ if submitted:
                 "fix_summary": fix_summary,
             }
             st.session_state["stream_pending"] = True
+            st.session_state["restored_from_disk"] = False
+            get_runtime_payload_store()[st.session_state["visit_id"]] = st.session_state["generated_payload"]
+            append_plan_history(st.session_state["generated_payload"])
+
+            progress.progress(100, text="生成完成")
+            time.sleep(0.15)
+            progress.empty()
+            st.rerun()
 
 
 def render_day_plan_section(
@@ -259,34 +534,6 @@ if payload:
         st.info(data.get("overview", "(无)"))
         st.write(f"预算策略：{data.get('budget_summary', '(无)')}")
 
-        st.subheader("🧭 多日总览路线（按天分段）")
-        available_days = sorted(
-            {
-                int(item.get("day"))
-                for item in data.get("daily_plan", [])
-                if isinstance(item.get("day"), int)
-            }
-        )
-        selected_days = st.multiselect(
-            "选择显示天数",
-            options=available_days,
-            default=available_days,
-            format_func=lambda d: f"Day {d}",
-            key="multiday_filter_days",
-        )
-
-        render_multiday_route_map(
-            amap_api_key=AMAP_API_KEY,
-            destination=destination_saved,
-            structured_data=data,
-            point_radius_px=point_radius_px,
-            map_engine=map_engine,
-            selected_days=selected_days,
-            max_segment_km=float(max_segment_km),
-            route_mode=route_mode,
-            destination_radius_km=float(destination_radius_km),
-        )
-
         st.subheader("📅 每日安排")
         daily_plan = data.get("daily_plan", [])
         stream_pending = bool(st.session_state.get("stream_pending", False))
@@ -324,6 +571,36 @@ if payload:
                     route_mode=route_mode,
                     destination_radius_km=float(destination_radius_km),
                 )
+
+        st.subheader("🧭 多日总览路线（按天分段）")
+        st.caption("总览图复用各天路线计算结果并进行合并展示。")
+        available_days = sorted(
+            {
+                int(item.get("day"))
+                for item in data.get("daily_plan", [])
+                if isinstance(item.get("day"), int)
+            }
+        )
+        selected_days = st.multiselect(
+            "选择显示天数",
+            options=available_days,
+            default=available_days,
+            format_func=lambda d: f"Day {d}",
+            key="multiday_filter_days",
+        )
+
+        render_multiday_route_map(
+            amap_api_key=AMAP_API_KEY,
+            destination=destination_saved,
+            structured_data=data,
+            point_radius_px=point_radius_px,
+            map_engine=map_engine,
+            selected_days=selected_days,
+            max_segment_km=float(max_segment_km),
+            route_mode=route_mode,
+            destination_radius_km=float(destination_radius_km),
+            fast_mode=False,
+        )
 
         tips = data.get("tips", [])
         if tips:
@@ -374,13 +651,20 @@ if payload:
 
             pdf_bytes = markdown_to_pdf_bytes(md_text, daily_route_maps=daily_route_maps)
             st.download_button(
-                label="🧾 下载 PDF",
+                label="🧾 下载 PDF（含路线图）",
                 data=pdf_bytes,
                 file_name=f"travel_plan_{destination_saved.replace(' ', '_')}.pdf",
                 mime="application/pdf",
             )
         except Exception as e:
-            st.warning(f"PDF 生成失败，可先下载 Markdown。原因: {e}")
+            st.warning(f"含路线图 PDF 生成失败，已回退基础 PDF。原因: {e}")
+            base_pdf_bytes = build_base_pdf_bytes(md_text)
+            st.download_button(
+                label="🧾 下载 PDF",
+                data=base_pdf_bytes,
+                file_name=f"travel_plan_{destination_saved.replace(' ', '_')}.pdf",
+                mime="application/pdf",
+            )
     else:
         st.subheader("📄 原始结果")
         st.markdown(plan_saved["raw"])
