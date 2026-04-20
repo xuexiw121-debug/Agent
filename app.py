@@ -1,5 +1,6 @@
 import json
 import time
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime
 from pathlib import Path
@@ -74,31 +75,63 @@ def build_base_pdf_bytes(markdown_text: str) -> bytes:
     return markdown_to_pdf_bytes(markdown_text, daily_route_maps=None)
 
 
-def load_plan_history() -> list:
+def _load_history_store() -> dict:
     try:
         if not HISTORY_PATH.exists():
-            return []
+            return {}
         data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+        # 新格式: {visit_id: [records]}
+        if isinstance(data, dict):
+            normalized = {}
+            for k, v in data.items():
+                if isinstance(v, list):
+                    normalized[str(k)] = v
+            return normalized
+        # 兼容旧格式: [records]
         if isinstance(data, list):
-            return data
-        return []
+            return {"__legacy_shared__": data}
+        return {}
     except Exception:
-        return []
+        return {}
 
 
-def save_plan_history(items: list) -> None:
+def _save_history_store(store: dict) -> None:
     try:
         HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
         HISTORY_PATH.write_text(
-            json.dumps(items, ensure_ascii=False, indent=2),
+            json.dumps(store, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except Exception:
         pass
 
 
-def append_plan_history(payload: dict) -> None:
-    history = load_plan_history()
+def load_plan_history(visit_id: str) -> list:
+    store = _load_history_store()
+
+    if visit_id in store and isinstance(store.get(visit_id), list):
+        return store.get(visit_id, [])
+
+    legacy = store.get("__legacy_shared__")
+    if isinstance(legacy, list) and legacy:
+        # 首次读取时将旧格式历史迁移到当前访问，避免继续全局共享
+        store[visit_id] = legacy
+        store.pop("__legacy_shared__", None)
+        _save_history_store(store)
+        return store.get(visit_id, [])
+
+    return []
+
+
+def save_plan_history(items: list, visit_id: str) -> None:
+    store = _load_history_store()
+    store[visit_id] = items
+    store.pop("__legacy_shared__", None)
+    _save_history_store(store)
+
+
+def append_plan_history(payload: dict, visit_id: str) -> None:
+    history = load_plan_history(visit_id)
     snapshot = json.loads(json.dumps(payload, ensure_ascii=False))
     record = {
         "id": uuid4().hex,
@@ -110,7 +143,7 @@ def append_plan_history(payload: dict) -> None:
     }
     history.insert(0, record)
     # 控制体量，避免历史文件过大
-    save_plan_history(history[:20])
+    save_plan_history(history[:20], visit_id)
 
 
 def inject_ui_style() -> None:
@@ -293,7 +326,7 @@ if st.session_state.get("restored_from_disk"):
     st.info("已恢复本次访问的上次生成结果。")
 
 with st.sidebar.expander("🗂️ 历史方案库", expanded=True):
-    history_items = load_plan_history()
+    history_items = load_plan_history(st.session_state["visit_id"])
     top_left, top_right = st.columns(2)
     top_left.caption(f"共 {len(history_items)} 条")
     if top_right.button("清空全部", key="clear_all_history_btn", use_container_width=True):
@@ -303,7 +336,7 @@ with st.sidebar.expander("🗂️ 历史方案库", expanded=True):
         st.warning("确认清空全部历史记录？此操作不可恢复。")
         confirm_col, cancel_col = st.columns(2)
         if confirm_col.button("确认清空", key="confirm_clear_all_history", use_container_width=True):
-            save_plan_history([])
+            save_plan_history([], st.session_state["visit_id"])
             st.session_state["confirm_clear_history"] = False
             st.rerun()
         if cancel_col.button("取消", key="cancel_clear_all_history", use_container_width=True):
@@ -332,7 +365,7 @@ with st.sidebar.expander("🗂️ 历史方案库", expanded=True):
             if c_delete.button("删除", key=f"delete_history_{idx}", use_container_width=True):
                 delete_id = item.get("id")
                 updated = [x for x in history_items if x.get("id") != delete_id]
-                save_plan_history(updated)
+                save_plan_history(updated, st.session_state["visit_id"])
                 st.rerun()
             st.divider()
 
@@ -442,7 +475,7 @@ if submitted:
             st.session_state["stream_pending"] = True
             st.session_state["restored_from_disk"] = False
             get_runtime_payload_store()[st.session_state["visit_id"]] = st.session_state["generated_payload"]
-            append_plan_history(st.session_state["generated_payload"])
+            append_plan_history(st.session_state["generated_payload"], st.session_state["visit_id"])
 
             progress.progress(100, text="生成完成")
             time.sleep(0.15)
@@ -628,43 +661,81 @@ if payload:
             mime="text/markdown",
         )
 
-        try:
-            daily_route_maps = []
-            for day_item in data.get("daily_plan", []):
-                image_url = build_day_route_snapshot_url(
-                    amap_api_key=AMAP_API_KEY,
-                    destination=destination_saved,
-                    day_item=day_item,
-                    max_segment_km=float(max_segment_km),
-                    route_mode=route_mode,
-                    destination_radius_km=float(destination_radius_km),
-                )
-                if image_url:
-                    daily_route_maps.append(
-                        {
-                            "day": day_item.get("day", "?"),
-                            "theme": day_item.get("theme", ""),
-                            "spots": day_item.get("highlights", []),
-                            "image_url": image_url,
-                        }
-                    )
+        pdf_file_name = f"travel_plan_{destination_saved.replace(' ', '_')}.pdf"
+        pdf_key_seed = (
+            f"{destination_saved}|{md_text}|{route_mode}|"
+            f"{float(max_segment_km):.2f}|{float(destination_radius_km):.2f}"
+        )
+        pdf_cache_key = hashlib.sha1(pdf_key_seed.encode("utf-8")).hexdigest()
 
-            pdf_bytes = markdown_to_pdf_bytes(md_text, daily_route_maps=daily_route_maps)
+        if st.session_state.get("pdf_cache_key") != pdf_cache_key:
+            st.session_state["pdf_cache_key"] = pdf_cache_key
+            st.session_state["pdf_cached_bytes"] = None
+            st.session_state["pdf_cached_label"] = "🧾 下载 PDF（含路线图）"
+            st.session_state["pdf_cached_error"] = None
+
+        if st.session_state.get("pdf_cached_bytes") is not None:
+            st.download_button(
+                label=st.session_state.get("pdf_cached_label", "🧾 下载 PDF（含路线图）"),
+                data=st.session_state["pdf_cached_bytes"],
+                file_name=pdf_file_name,
+                mime="application/pdf",
+            )
+            if st.session_state.get("pdf_cached_error"):
+                st.caption(st.session_state["pdf_cached_error"])
+        else:
             st.download_button(
                 label="🧾 下载 PDF（含路线图）",
-                data=pdf_bytes,
-                file_name=f"travel_plan_{destination_saved.replace(' ', '_')}.pdf",
+                data=b"",
+                file_name=pdf_file_name,
                 mime="application/pdf",
+                disabled=True,
+                help="PDF 正在生成中，请稍候...",
             )
-        except Exception as e:
-            st.warning(f"含路线图 PDF 生成失败，已回退基础 PDF。原因: {e}")
-            base_pdf_bytes = build_base_pdf_bytes(md_text)
-            st.download_button(
-                label="🧾 下载 PDF",
-                data=base_pdf_bytes,
-                file_name=f"travel_plan_{destination_saved.replace(' ', '_')}.pdf",
-                mime="application/pdf",
-            )
+            st.caption("正在生成 PDF（含路线图），完成后按钮将自动可点击。")
+            daily_plan_items = data.get("daily_plan", [])
+            total_steps = max(1, len(daily_plan_items) + 1)
+            pdf_progress = st.progress(0, text="正在准备 PDF 内容...")
+            try:
+                daily_route_maps = []
+                for idx, day_item in enumerate(daily_plan_items, start=1):
+                    day_no = day_item.get("day", idx)
+                    pdf_progress.progress(
+                        int((idx / total_steps) * 100),
+                        text=f"正在处理 Day {day_no} 路线图（{idx}/{len(daily_plan_items)}）...",
+                    )
+                    image_url = build_day_route_snapshot_url(
+                        amap_api_key=AMAP_API_KEY,
+                        destination=destination_saved,
+                        day_item=day_item,
+                        max_segment_km=float(max_segment_km),
+                        route_mode=route_mode,
+                        destination_radius_km=float(destination_radius_km),
+                    )
+                    if image_url:
+                        daily_route_maps.append(
+                            {
+                                "day": day_item.get("day", "?"),
+                                "theme": day_item.get("theme", ""),
+                                "spots": day_item.get("highlights", []),
+                                "image_url": image_url,
+                            }
+                        )
+
+                pdf_progress.progress(95, text="正在排版并生成 PDF 文件...")
+                st.session_state["pdf_cached_bytes"] = markdown_to_pdf_bytes(
+                    md_text,
+                    daily_route_maps=daily_route_maps,
+                )
+                st.session_state["pdf_cached_label"] = "🧾 下载 PDF（含路线图）"
+                st.session_state["pdf_cached_error"] = None
+                pdf_progress.progress(100, text="PDF 已生成，正在刷新下载按钮...")
+            except Exception as e:
+                st.session_state["pdf_cached_bytes"] = build_base_pdf_bytes(md_text)
+                st.session_state["pdf_cached_label"] = "🧾 下载 PDF"
+                st.session_state["pdf_cached_error"] = f"含路线图生成失败，已回退基础 PDF。原因: {e}"
+                pdf_progress.progress(100, text="路线图生成失败，已回退基础 PDF。")
+            st.rerun()
     else:
         st.subheader("📄 原始结果")
         st.markdown(plan_saved["raw"])
