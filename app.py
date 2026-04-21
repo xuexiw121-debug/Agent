@@ -272,7 +272,7 @@ inject_ui_style()
 st.markdown(
     """
     <div class="hero-wrap">
-      <h1 class="hero-title">AI 智能旅行规划师</h1>
+      <h1 class="hero-title">面向旅游业的AI智能体</h1>
       <p class="hero-sub">结合大语言模型与地图路径能力，自动生成可执行的多日旅行方案，支持分段展示与报告导出。</p>
       <div class="hero-badges">
         <span class="hero-badge">路线可视化</span>
